@@ -6,3 +6,4 @@ output/
 
 # ide stuff
 .vscode
+.DS_Store

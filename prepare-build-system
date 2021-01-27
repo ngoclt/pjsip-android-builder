@@ -212,7 +212,7 @@ then
     echo "Extracting Opus ..."
     tar xzf opus.tar.gz && rm -rf opus.tar.gz
     cd ${BASEDIR}
-    ./opus-build || true
+    ./opus-build
 fi
 
 echo ""
