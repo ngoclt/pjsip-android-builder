@@ -79,20 +79,21 @@ if [ "$DOWNLOAD_ANDROID_APIS" == "1" ]
 then
     cd $DOWNLOAD_DIR/${SDK_DIR_NAME}/tools
 
+    mkdir -p licenses
+
+    echo "8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > licenses/android-sdk-license
+    echo "84831b9409646a918e30573bab4c9c91346d8abd\n504667f4c0de7af1a06de9f4b1727b84351f2910" > licenses/android-sdk-preview-license
+    yes | ./bin/sdkmanager "build-tools;30.0.2"
+
     ALL_SDK=$(./android list sdk --all)
 
     for api in "${SETUP_ANDROID_APIS[@]}"
     do
         echo "\n\nDownloading Android API Platform ${api}..."
-        PACKAGE=$(echo "${ALL_SDK}" | grep "API ${api}" | head -n 1 | awk '{print $1}' | cut -d'-' -f 1)
-        echo yes | ./android update sdk --all --filter ${PACKAGE} --no-ui --force
+        PACKAGE="platforms;android-${api}"
+        echo yes | ./bin/sdkmanager ${PACKAGE}
     done
 
-    PACKAGE=$(echo "${ALL_SDK}" | grep "Android SDK Platform-tools" | head -n 1 | awk '{print $1}' | cut -d'-' -f 1)
-    echo yes | ./android update sdk --all --filter ${PACKAGE} --no-ui --force
-
-    PACKAGE=$(echo "${ALL_SDK}" | grep "Build-tools" | grep "${BUILD_TOOLS_VERSION}" | head -n 1 | awk '{print $1}' | cut -d'-' -f 1)
-    echo yes | ./android update sdk --all --filter ${PACKAGE} --no-ui --force
 fi
 
 if [ "$DOWNLOAD_PJSIP" == "1" ]
