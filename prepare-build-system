@@ -201,6 +201,21 @@ then
     ./openh264-build-target-archs || true
 fi
 
+if [ "$DOWNLOAD_LIBVPX" == "1" ]
+then
+    echo ""
+    echo "Downloading Libvpx ${LIBVPX_VERSION} ..."
+    echo ""
+    cd $DOWNLOAD_DIR
+    curl -L -# -o libvpx.tar.gz "$LIBVPX_DOWNLOAD_URL" 2>&1
+    rm -rf "${LIBVPX_DIR_NAME}"
+    echo "Libvpx downloaded!"
+    echo "Extracting Libvpx ..."
+    tar xzf libvpx.tar.gz && rm -rf libvpx.tar.gz
+    cd ${BASEDIR}
+    ./libvpx-build-target-archs || true
+fi
+
 if [ "$DOWNLOAD_OPUS" == "1" ]
 then
     echo ""

@@ -1,0 +1,303 @@
+#!/bin/bash -e
+#@author Eng ChongMeng (alex.gotev@mobimesh.it)
+#Code is taken from https://github.com/cmeng-git/vpx-android
+
+# Uncomment the line below to see all script echo to terminal
+set -x
+
+. config.conf
+
+if [ "$#" -ne 6 ]
+then
+    echo "Usage:"
+    echo "./libvpx-build <ANDROID_NDK_PATH> <OPENSSL_SOURCES_PATH> <ANDROID_TARGET_API> \\"
+    echo "                <ANDROID_TARGET_ABI> <GCC_VERSION> <OUTPUT_PATH>"
+    echo
+    echo "Supported target ABIs: armeabi, armeabi-v7a, x86, x86_64, arm64-v8a, mips, mips64"
+    echo
+    echo "Example using GCC 4.8, NDK 10e, OpenSSL 1.0.2d and Android API 21 for armeabi-v7a."
+    echo "./openssl-build /home/user/android-ndk-r10e \\"
+    echo "                /home/user/openssl-1.0.2d \\"
+    echo "                21 \\"
+    echo "                armeabi-v7a \\"
+    echo "                4.8 \\"
+    echo "                /home/user/output/armeabi-v7a"
+    exit 1
+fi
+
+NDK_DIR=$1
+BASE_FOLDER=$2
+TARGET_API=$3 # ANDROID_API
+TARGET_ABI=$4
+GCC_VERSION=$5 # NDK_ABI_VERSION
+OUTPUT_PATH=$6
+
+LIBVPX_TMP_FOLDER="/tmp/libvpx"
+rm -rf "$LIBVPX_TMP_FOLDER"
+mkdir -p "$LIBVPX_TMP_FOLDER"
+cp -r ${BASE_FOLDER}/* ${LIBVPX_TMP_FOLDER}
+
+BASEDIR=${BASE_FOLDER}
+NDK=${NDK_DIR}
+HOST_NUM_CORES=$(nproc)
+
+export ANDROID_NDK=${NDK_DIR}
+
+# https://gcc.gnu.org/onlinedocs/gcc-4.9.1/gcc/Optimize-Options.html
+# Note: vpx with ABIs x86 and x86_64 build has error with option -fstack-protector-all
+# Note: final libraries built is 20~33% bigger in size when below additional options are specified
+# CFLAGS_="-DANDROID -fpic -fpie -ffunction-sections -funwind-tables -fstack-protector -fno-strict-aliasing -fno-strict-overflow -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2"
+CFLAGS_="-DANDROID -fpic -fpie"
+# Enable report-all for earlier detection of errors instead at later stage
+# /home/cmeng/workspace/ndk/vpx-android/armeabi-v7a-android-toolchain/bin/arm-linux-androideabi-ld: -Wl,-z,defs -Wl,--unresolved-symbols=report-all: unknown option
+# Not compatible with libvpx v.1.8.2
+# LDFLAGS_="-Wl,-z,defs -Wl,--unresolved-symbols=report-all"
+LDFLAGS_=""
+
+# Do not modify any of the NDK_ARCH, CPU and -march unless you are very sure.
+# The settings are used by <ARCH>-linux-android-gcc and submodule configure
+# https://en.wikipedia.org/wiki/List_of_ARM_microarchitectures
+# $NDK/toolchains/llvm/prebuilt/...../includellvm/ARMTargetParser.def etc
+# ARCH - should be one from $ANDROID_NDK/platforms/android-$API/arch-* [arm / arm64 / mips / mips64 / x86 / x86_64]"
+# https://gcc.gnu.org/onlinedocs/gcc/AArch64-Options.html
+
+configure() {
+   # Deprecated in r16. Will be removed in r17
+  if [ "$TARGET_ABI" == "armeabi" ]
+  then
+      NDK_ARCH="arm"
+      NDK_ABIARCH="arm-linux-androideabi"
+      CFLAGS="-march=armv5 -marm -finline-limit=64"
+      LDFLAGS=""
+      ASFLAGS=""
+    # Standalone toolchains error.
+    # /home/cmeng/workspace/ndk/vpx-android/armeabi-v7a-android-toolchain/bin/arm-linux-androideabi-ld: -Wl,--fix-cortex-a8: unknown option
+
+  elif [ "$TARGET_ABI" == "armeabi-v7a" ]
+  then
+      NDK_ARCH="arm"
+      NDK_ABIARCH="arm-linux-androideabi"
+    # clang70: warning: -Wl,--fix-cortex-a8: 'linker' input unused [-Wunused-command-line-argument]
+    # CFLAGS="${CFLAGS_} -Wl,--fix-cortex-a8 -march=${CPU} -mfloat-abi=softfp -mfpu=neon -mtune=cortex-a8 -mthumb -D__thumb__"
+      CFLAGS="${CFLAGS_} -Os -march=armv7-a -mfloat-abi=softfp -mfpu=neon -mtune=cortex-a8 -mthumb -D__thumb__"
+      LDFLAGS="${LDFLAGS_} -march=armv7-a" # -Wl,--fix-cortex-a8" not valid option
+      ASFLAGS=""
+
+    # 1. -march=${CPU} flag targets the armv7 architecture.
+    # 2. -mfloat-abi=softfp enables hardware-FPU instructions while ensuring that the system passes
+    #     floating-point parameters in core registers, which is critical for ABI compatibility
+    # 3. -mfpu=neon setting forces the use of VFPv3-D32, per the ARM specifications
+    # 4. -mthumb forces the generation of 16-bit Thumb-2 instructions (Thumb-1 for armeabi).
+    #     If omitted, the toolchain will emit 32-bit ARM instructions.
+    # 5. -Wl,--fix-cortex-a8 is required as a workaround for a CPU bug in some Cortex-A8 implementation
+    #     (x264 flags as warning) Standalone toolchains does not accept this option. SDK toolchains (gcc/cg++) is ok.
+    #    /home/cmeng/workspace/ndk/ffmpeg-android/toolchain-android/bin/arm-linux-androideabi-ld: -Wl,--fix-cortex-a8: unknown option
+    # LDFLAGS="-Wl,--fix-cortex-a8"
+
+  elif [ "$TARGET_ABI" == "arm64-v8a" ]
+  then
+      # Valid cpu = armv8-a cortex-a35, cortex-a53, cortec-a57 etc. but -march=armv8-a is required
+      # x264 build has own undefined references e.g. x264_8_pixel_sad_16x16_neon - show up when build ffmpeg 
+      NDK_ARCH="arm64"
+      NDK_ABIARCH="aarch64-linux-android"
+      CFLAGS="${CFLAGS_} -O3-march=armv8-a"
+      # Supported emulations: aarch64linux aarch64elf aarch64elf32 aarch64elf32b aarch64elfb armelf armelfb
+      # aarch64linuxb aarch64linux32 aarch64linux32b armelfb_linux_eabi armelf_linux_eabi
+	  #-march=armv8-a or arch64linux: all are not valid for libvpx v1.8.2 build with standalone toolchains
+      LDFLAGS="${LDFLAGS_}" # -march=arch64linux" not valid also
+      ASFLAGS=""
+
+  elif [ "$TARGET_ABI" == "x86" ]
+  then
+      NDK_ARCH="x86"
+      NDK_ABIARCH="i686-linux-android"
+      CFLAGS="${CFLAGS_} -O3 -march=i686 -mtune=intel -msse3 -mfpmath=sse -m32 -fPIC"
+      LDFLAGS="-m32"
+      ASFLAGS="-D__ANDROID__"
+  
+  elif [ "$OPENSSL_TARGET_ABI" == "x86_64" ]
+  then
+      NDK_ARCH="x86_64"
+      NDK_ABIARCH="x86_64-linux-android"
+      CFLAGS="${CFLAGS_} -O3 -march=x86-64 -mtune=intel -msse4.2 -mpopcnt -m64 -fPIC"
+      LDFLAGS=""
+      ASFLAGS="-D__ANDROID__"
+
+  else
+    echo "Unsupported target ABI: $TARGET_ABI"
+    exit 1
+  fi
+
+
+  echo "Making toolchain for ${NDK_ARCH} ${TARGET_ABI}"
+
+  NDK_MAKE_TOOLCHAIN="$NDK_DIR/build/tools/make-standalone-toolchain.sh"
+  TOOLCHAIN_PREFIX=${BASEDIR}/android-toolchain
+  NDK_SYSROOT=${TOOLCHAIN_PREFIX}/sysroot
+
+  # bin/python-config.sh
+  # prefix_build="/usr/local/google/buildbot/src/android/ndk-r15-release/out/build/buildhost/linux-x86_64/install/host-tools"
+  # prefix_build="/usr/local/google/buildbot/src/android/ndk-release-r15/out/build/buildhost/linux-x86_64/install/host-tools"
+  if [[ ! -e ${TOOLCHAIN_PREFIX}/${NDK_ABIARCH} ]]; then
+      rm -rf ${TOOLCHAIN_PREFIX}
+  #else
+  #  TC_RELEASE="$(grep 'prefix_build=' < ${TOOLCHAIN_PREFIX}/bin/python-config.sh | sed 's/^.*\/android\/ndk[-release]*\-\(r[0-9][0-9]\).*$/ndk-\1/')"
+  #  if [[ ! ${ANDROID_NDK} =~ ${TC_RELEASE} ]]; then
+  #    rm -rf ${TOOLCHAIN_PREFIX}
+  #    echo "Rebuild standalone toolchains for ${NDK_ABIARCH}"
+  #  fi
+  fi
+
+  # cmeng: must ensure AS JNI uses the same STL library or "system"
+  [[ -d ${TOOLCHAIN_PREFIX} ]] || ${NDK_MAKE_TOOLCHAIN} --arch=${NDK_ARCH} \
+                                                        --platform=android-${TARGET_API} \
+                                                        --stl=libc++ \
+                                                        --install-dir=${TOOLCHAIN_PREFIX}
+
+  # Define the install-directory of the libs and include files etc
+  PREFIX=${OUTPUT_PATH}
+
+  # Add the standalone toolchain to the search path.
+  export PATH=${TOOLCHAIN_PREFIX}/bin:$PATH
+  export CROSS_PREFIX=${TOOLCHAIN_PREFIX}/bin/${NDK_ABIARCH}-
+  export CFLAGS="${CFLAGS}"
+  export CPPFLAGS="${CFLAGS}"
+  export CXXFLAGS="${CFLAGS} -std=c++11"
+  export ASFLAGS="${ASFLAGS}"
+  export LDFLAGS="${LDFLAGS} -L${NDK_SYSROOT}/usr/lib"
+
+  export AR="${CROSS_PREFIX}ar"
+  export AS="${CROSS_PREFIX}clang"
+  export CC="${CROSS_PREFIX}clang"
+  export CXX="${CROSS_PREFIX}clang++"
+  export LD="${CROSS_PREFIX}ld"
+  export STRIP="${CROSS_PREFIX}strip"
+  export RANLIB="${CROSS_PREFIX}ranlib"
+  export CPP="${CROSS_PREFIX}cpp"
+  export NM="${CROSS_PREFIX}nm"
+
+  echo "**********************************************"
+  echo "### Use NDK=${NDK}"
+  echo "### Use ANDROID_API=${TARGET_API}"
+  echo "### Install directory: PREFIX=${PREFIX}"
+  echo "**********************************************"
+}
+
+configure_make() {
+  
+  pushd "${LIBVPX_TMP_FOLDER}"
+  echo -e "\n** BUILD STARTED: libvpx (${LIBVPX_VERSION}) for ${TARGET_ABI} **"
+
+  configure $*
+  if [ "$TARGET_ABI" == "armeabi" ]
+  then
+      TARGET="armv7-android-gcc --disable-neon --disable-neon-asm"
+    # need to add --disable-neon-asm for libvpx v1.8.2, otherwise:
+    # clang70: error: linker command failed with exit code 1 (use -v to see invocation)
+	  # ./lib/crtbegin_dynamic.o:crtbegin.c:function _start_main: error: undefined reference to 'main'
+    # make[1]: *** [vpx_dsp/arm/intrapred_neon_asm.asm.S.o] Error 1
+  	# make[1]: *** [vpx_dsp/arm/vpx_convolve_copy_neon_asm.asm.S.o] Error 1
+
+	elif [ "$TARGET_ABI" == "armeabi-v7a" ]
+  then
+      TARGET="armv7-android-gcc --enable-neon --disable-neon-asm"
+  
+  elif [ "$TARGET_ABI" == "arm64-v8a" ]
+  then
+      TARGET="arm64-android-gcc"
+
+  elif [ "$TARGET_ABI" == "x86" ]
+  then
+      TARGET="x86-android-gcc"
+
+  elif [ "$OPENSSL_TARGET_ABI" == "x86_64" ]
+  then
+      TARGET="x86_64-android-gcc"
+
+  else
+    echo "Unsupported target ABI: $TARGET_ABI"
+    exit 1
+  fi
+
+  # --sdk-path=${TOOLCHAIN_PREFIX} must use ${NDK} actual path else cannot find CC for arm64-android-gcc
+  # ==> (Unable to invoke compiler: /arm-linux-androideabi-gcc)
+  # https://bugs.chromium.org/p/webm/issues/detail?id=1476
+  
+  # fixed by patch 10.libvpx_configure.sh.patch
+  # https://github.com/google/ExoPlayer/issues/3520 (VP9 builds failure with android-ndk-r16 #3520)
+  # https://github.com/android-ndk/ndk/issues/190#issuecomment-375164450 (unknown type name __uint128_t on ndk-build #190)
+  # Has configure error with Target=arm64-android-gcc which uses incorrect cc i.e. arm-linux-androideabi-gcc;
+
+  # ./asm/sigcontext.h:39:3: error: unknown type name '__uint128_t'
+  # GCC has builtin support for the types __int128, unsigned __int128, __int128_t and __uint128_t. Use them to define your own types:
+  # typedef __int128 int128_t;
+  # typedef unsigned __int128 uint128_t;
+  # Standalone toolchains fixed the problem?
+
+  # need --as=yasm which is required by x86 and x86-64; cannot use define in _settings.sh which uses clang
+  # see https://github.com/webmproject/libvpx
+
+  # --sdk-path=${NDK} when specified - configure will use SDK toolchains and gcc/g++ as the default compiler/linker
+  # must specified --extra-cflags and --libc if use --sdk-path
+  # --sdk-path=${NDK} \
+  # --extra-cflags="-isystem ${NDK}/sysroot/usr/include/${NDK_ABIARCH} -isystem ${NDK}/sysroot/usr/include" \
+  # must specified -libc from standalone toolchains, libvpx configure.sh cannot get the right arch to use
+
+  # SDK toolchains has error with ndk-r18b; however ndk-R17c and ndk-r16b are ok (gcc/g++)
+  # SDK toolchains ndk-r18b is working with libvpx v1.8.2 without the sdk option
+
+  # Standalone toolchains built has problem with ABIS="armeabi-v7a"
+  # /tmp/vpx-conf-31901-2664.o(.ARM.exidx.text.main+0x0): error: undefined reference to '__aeabi_unwind_cpp_pr0'
+  #
+  # Cannot define option add_ldflags "-Wl,--fix-cortex-a8"
+  # Standalone: arm-linux-androideabi-ld: -Wl,--fix-cortex-a8: unknown option
+
+  # Fixed by: https://android.googlesource.com/platform/external/libvpx/+/ca30a60d2d6fbab4ac07c63bfbf7bbbd1fe6a583
+  # libvpx has the following errors for x86 and x86_64 when build in aTalk app;
+  # ./i686-linux-android/bin/ld: error: vpx/android/x86/lib/libvpx.a(deblock_sse2.asm.o): relocation R_386_GOTOFF against preemptible symbol vpx_rv cannot be used when making a shared object
+  # ./i686-linux-android/4.9.x/../../../../i686-linux-android/bin/ld: error: vpx/android/x86/lib/libvpx.a(subpixel_mmx.asm.o): relocation R_386_GOTOFF against preemptible symbol # vp8_bilinear_filters_x86_8 cannot be used when making a shared object
+  # ./i686-linux-android/bin/ld: error: vpx/android/x86/lib/libvpx.a(subpixel_mmx.asm.o): relocation R_386_GOTOFF against preemptible symbol vp8_bilinear_filters_x86_8 cannot be used when making a shared object
+  # ./i686-linux-android/bin/ld: error: vpx/android/x86/lib/libvpx.a(subpixel_sse2.asm.o): relocation R_386_GOTOFF against preemptible symbol vp8_bilinear_filters_x86_8 cannot be used when making a shared object
+  # ./i686-linux-android/bin/ld: error: vpx/android/x86/lib/libvpx.a(subpixel_sse2.asm.o): relocation R_386_GOTOFF against preemptible symbol vp8_bilinear_filters_x86_8 cannot be used when making a shared object
+  # ./x86_64-linux-android/bin/ld: error: vpx/android/x86_64/lib/libvpx.a(deblock_sse2.asm.o): requires dynamic R_X86_64_PC32 reloc against 'vpx_rv' which may overflow at runtime; recompile with -fPIC
+
+  # Need --disable-avx2 to fix x86_64 problem OR enable --enable-runtime-cpu-detect option
+  # org.atalk.android A/libc: Fatal signal 4 (SIGILL), code 2 (ILL_ILLOPN), fault addr 0x77b2ac1757e6 in tid 20780 (Loop thread: ne), pid 20363 (g.atalk.android)
+  # see https://bugs.chromium.org/p/webm/issues/detail?id=1623#c1
+  # OR use option --enable-runtime-cpu-detect for x86/x86_64 ABIS platforms
+
+  CPU_DETECT="--disable-runtime-cpu-detect"
+  if [[ $1 =~ x86.* ]]; then
+    CPU_DETECT="--enable-runtime-cpu-detect"
+  fi
+
+  # When use --sdk-path option for libvpx v1.8.0; must use android-ndk-r17c or lower
+  # For libvpx v1.8.2: in order to use standalone toolchanis, must not specified --sdk-path (option removed)
+  #    --sdk-path=${NDK}
+
+  ./configure \
+    --extra-cflags="-isystem ${NDK_SYSROOT}/usr/include/${NDK_ABIARCH} -isystem ${NDK_SYSROOT}/usr/include" \
+    --libc=${NDK_SYSROOT} \
+    --prefix=${PREFIX} \
+    --target=${TARGET} \
+    ${CPU_DETECT} \
+    --as=yasm \
+    --enable-pic \
+    --disable-docs \
+    --enable-static \
+    --enable-libyuv \
+    --disable-examples \
+    --disable-tools \
+    --disable-debug \
+    --disable-unit-tests \
+    --enable-realtime-only \
+    --enable-vp8 --enable-vp9 \
+    --enable-vp9-postproc --enable-vp9-highbitdepth \
+    --disable-webm-io || exit 1
+
+  make -j${HOST_NUM_CORES} install
+  popd
+}
+
+configure_make "${TARGET_ABI}"
+echo -e "** BUILD COMPLETED: ${LIB_VPX} for ${TARGET_ABI} **\n\n"
